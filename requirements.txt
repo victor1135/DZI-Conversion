@@ -1,0 +1,28 @@
+# FastAPI 後端
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+
+# 圖片處理 - 轉換 DZI (純 Pillow，無需系統依賴)
+Pillow>=10.0.0
+
+# AWS S3
+boto3>=1.28.0
+
+# 阿里雲 OSS (可選)
+# oss2>=2.18.0
+
+# 其他工具
+python-dotenv>=1.0.0
+aiofiles>=23.0.0
+requests>=2.31.0
+
+# 性能監控 (可選，但推薦安裝以獲得詳細的 CPU/內存監控)
+psutil>=5.9.0
+
+# 病理切片支援：如需處理 .svs, .ndpi, .mrxs 等格式，需要安裝系統級 libvips
+# Windows: 下載 https://github.com/libvips/libvips/releases 並設置環境變量
+# macOS: brew install vips
+# Linux: apt-get install libvips-dev
+pyvips>=2.2.0
+
