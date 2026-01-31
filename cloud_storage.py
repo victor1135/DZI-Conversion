@@ -197,68 +197,124 @@ class S3Storage:
         else:
             raise ValueError("No credentials provided and bucket is not public. Cannot upload.")
         
-        # 並行上傳函數
+        # 判斷錯誤是否可重試
+        def is_retryable_error(error):
+            """判斷錯誤是否可重試（網絡錯誤等）"""
+            error_str = str(error)
+            error_type = type(error).__name__
+            
+            # 網絡相關錯誤（可重試）
+            retryable_errors = [
+                'ConnectionResetError',
+                'ConnectionError',
+                'RemoteDisconnected',
+                'Timeout',
+                'timeout',
+                'Connection aborted',
+                'Connection reset',
+                'Broken pipe',
+                'Network is unreachable',
+                'Temporary failure',
+            ]
+            
+            # 檢查錯誤類型或錯誤消息
+            for retryable in retryable_errors:
+                if retryable in error_type or retryable in error_str:
+                    return True
+            
+            return False
+        
+        # 並行上傳函數（帶重試機制）
         def upload_file(args):
             local_path, cloud_key, content_type = args
-            try:
-                if not os.path.exists(local_path):
-                    error_msg = f"File not found: {local_path}"
-                    print(f"[ERROR] {error_msg}")
-                    return False, (cloud_key, error_msg)
-                
-                file_size = os.path.getsize(local_path)
-                
-                if use_http_put:
-                    # 使用直接 HTTP PUT 請求（無簽名，適用於 public bucket）
-                    s3_url = f"{self.base_url}/{cloud_key}"
-                    
-                    with open(local_path, 'rb') as f:
-                        response = requests.put(
-                            s3_url,
-                            data=f,
-                            headers={
-                                'Content-Type': content_type,
-                            },
-                            timeout=(30, 60)  # (connect_timeout, read_timeout)
-                        )
-                    
-                    if response.status_code == 200:
-                        return True, cloud_key
-                    else:
-                        error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
-                        print(f"[ERROR] Failed to upload {cloud_key}: {error_msg}")
+            max_retries = 3
+            retry_delay = 1  # 初始重試延遲（秒）
+            
+            for attempt in range(max_retries):
+                try:
+                    if not os.path.exists(local_path):
+                        error_msg = f"File not found: {local_path}"
+                        print(f"[ERROR] {error_msg}")
                         return False, (cloud_key, error_msg)
-                else:
-                    # 使用 boto3（有凭证）
-                    # 小文件（<5MB）使用 put_object（更快）
-                    if file_size < 5 * 1024 * 1024:
+                    
+                    file_size = os.path.getsize(local_path)
+                    
+                    if use_http_put:
+                        # 使用直接 HTTP PUT 請求（無簽名，適用於 public bucket）
+                        s3_url = f"{self.base_url}/{cloud_key}"
+                        
                         with open(local_path, 'rb') as f:
-                            shared_client.put_object(
-                                Bucket=self.bucket,
-                                Key=cloud_key,
-                                Body=f,
-                                ContentType=content_type
+                            response = requests.put(
+                                s3_url,
+                                data=f,
+                                headers={
+                                    'Content-Type': content_type,
+                                },
+                                timeout=(30, 120)  # 增加超時時間
                             )
+                        
+                        if response.status_code == 200:
+                            if attempt > 0:
+                                print(f"[INFO] Successfully uploaded {cloud_key} after {attempt} retries")
+                            return True, cloud_key
+                        else:
+                            error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                            # HTTP 5xx 錯誤可以重試
+                            if response.status_code >= 500:
+                                if attempt < max_retries - 1:
+                                    import time
+                                    time.sleep(retry_delay * (attempt + 1))
+                                    continue
+                            print(f"[ERROR] Failed to upload {cloud_key}: {error_msg}")
+                            return False, (cloud_key, error_msg)
                     else:
-                        # 大文件使用 upload_file with multipart
-                        shared_client.upload_file(
-                            local_path,
-                            self.bucket,
-                            cloud_key,
-                            ExtraArgs={'ContentType': content_type},
-                            Config=transfer_config
-                        )
-                    return True, cloud_key
-            except Exception as e:
-                error_msg = str(e)
-                error_type = type(e).__name__
-                print(f"[ERROR] Failed to upload {cloud_key}: {error_type}: {error_msg}")
-                # 如果是认证错误，提供更详细的提示
-                if 'AccessDenied' in error_msg or 'InvalidAccessKeyId' in error_msg or 'SignatureDoesNotMatch' in error_msg:
-                    print(f"[ERROR] Authentication error - check AWS credentials or bucket permissions")
-                elif 'NoCredentialsError' in error_type or 'credentials' in error_msg.lower():
-                    print(f"[ERROR] No AWS credentials found - set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
-                return False, (cloud_key, error_msg)
+                        # 使用 boto3（有凭证）
+                        # 小文件（<5MB）使用 put_object（更快）
+                        if file_size < 5 * 1024 * 1024:
+                            with open(local_path, 'rb') as f:
+                                shared_client.put_object(
+                                    Bucket=self.bucket,
+                                    Key=cloud_key,
+                                    Body=f,
+                                    ContentType=content_type
+                                )
+                        else:
+                            # 大文件使用 upload_file with multipart
+                            shared_client.upload_file(
+                                local_path,
+                                self.bucket,
+                                cloud_key,
+                                ExtraArgs={'ContentType': content_type},
+                                Config=transfer_config
+                            )
+                        if attempt > 0:
+                            print(f"[INFO] Successfully uploaded {cloud_key} after {attempt} retries")
+                        return True, cloud_key
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    error_type = type(e).__name__
+                    
+                    # 如果是可重試的錯誤且還有重試機會
+                    if is_retryable_error(e) and attempt < max_retries - 1:
+                        import time
+                        wait_time = retry_delay * (attempt + 1)  # 指數退避
+                        print(f"[WARNING] Retryable error for {cloud_key} (attempt {attempt + 1}/{max_retries}): {error_type}")
+                        print(f"[WARNING] Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    
+                    # 不可重試的錯誤或已用完重試次數
+                    print(f"[ERROR] Failed to upload {cloud_key}: {error_type}: {error_msg}")
+                    # 如果是认证错误，提供更详细的提示
+                    if 'AccessDenied' in error_msg or 'InvalidAccessKeyId' in error_msg or 'SignatureDoesNotMatch' in error_msg:
+                        print(f"[ERROR] Authentication error - check AWS credentials or bucket permissions")
+                    elif 'NoCredentialsError' in error_type or 'credentials' in error_msg.lower():
+                        print(f"[ERROR] No AWS credentials found - set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+                    return False, (cloud_key, error_msg)
+            
+            # 所有重試都失敗
+            return False, (cloud_key, f"Failed after {max_retries} attempts")
         
         # 根據可用內存動態調整並行度
         # 對於內存受限的環境（如 Railway 1GB），需要降低並行度
@@ -359,13 +415,18 @@ class S3Storage:
                     cloud_key, error_msg = item
                     if error_msg:
                         # 提取錯誤類型（第一個單詞或常見錯誤關鍵字）
+                        error_msg_lower = error_msg.lower()
                         if 'AccessDenied' in error_msg:
                             error_type = 'AccessDenied'
                         elif 'InvalidAccessKeyId' in error_msg or 'NoCredentialsError' in error_msg:
                             error_type = 'Authentication'
                         elif 'NoSuchBucket' in error_msg:
                             error_type = 'BucketNotFound'
-                        elif 'Network' in error_msg or 'timeout' in error_msg.lower():
+                        elif ('connection' in error_msg_lower and ('reset' in error_msg_lower or 'aborted' in error_msg_lower)) or \
+                             'remotedisconnected' in error_msg_lower or \
+                             'connectionreset' in error_msg_lower or \
+                             'timeout' in error_msg_lower or \
+                             'network' in error_msg_lower:
                             error_type = 'Network'
                         else:
                             error_type = 'Other'
@@ -404,8 +465,20 @@ class S3Storage:
                 print(f"\n[DIAGNOSIS] Bucket not found.")
                 print(f"  - Verify bucket name: {self.bucket}")
                 print(f"  - Check region: {self.region}")
+            elif 'Network' in error_types or 'Other' in error_types:
+                print(f"\n[DIAGNOSIS] Network errors detected (connection resets, timeouts).")
+                print(f"  - These are usually temporary network issues")
+                print(f"  - Files were retried up to 3 times automatically")
+                print(f"  - Consider retrying the failed files manually if needed")
             
-            raise Exception(f"Failed to upload {len(failed_uploads)} files out of {total_files}")
+            # 如果失敗的文件很少（<1%），允許部分失敗並繼續
+            failure_rate = len(failed_uploads) / total_files
+            if failure_rate < 0.01 and len(failed_uploads) < 10:
+                print(f"\n[WARNING] {len(failed_uploads)} files failed ({failure_rate*100:.2f}%), but continuing...")
+                print(f"[WARNING] You may need to manually retry uploading these files")
+                # 不拋出異常，允許繼續
+            else:
+                raise Exception(f"Failed to upload {len(failed_uploads)} files out of {total_files} ({failure_rate*100:.2f}%)")
         
         # 性能監控：上傳階段結束
         upload_elapsed = time.time() - upload_start
