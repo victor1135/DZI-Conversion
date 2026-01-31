@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import boto3
 from botocore.config import Config
 import boto3.s3.transfer
+import requests
 
 
 class S3Storage:
@@ -30,23 +31,22 @@ class S3Storage:
         self.bucket = bucket
         self.region = region
         self.is_public = is_public
+        self.access_key = access_key or os.getenv("AWS_ACCESS_KEY_ID")
+        self.secret_key = secret_key or os.getenv("AWS_SECRET_ACCESS_KEY")
         
-        # 如果是 public bucket，可以不需要 credentials
-        if is_public:
+        # S3 基础 URL
+        self.base_url = f"https://{bucket}.s3.{region}.amazonaws.com"
+        
+        # 如果有凭证，创建 boto3 client（用于有凭证上传）
+        if self.access_key and self.secret_key:
             self.client = boto3.client(
                 's3',
                 region_name=region,
-                config=Config(signature_version='UNSIGNED')
+                aws_access_key_id=self.access_key,
+                aws_secret_access_key=self.secret_key
             )
-            self.base_url = f"https://{bucket}.s3.{region}.amazonaws.com"
         else:
-            self.client = boto3.client(
-                's3',
-                region_name=region,
-                aws_access_key_id=access_key or os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=secret_key or os.getenv("AWS_SECRET_ACCESS_KEY")
-            )
-            self.base_url = f"https://{bucket}.s3.{region}.amazonaws.com"
+            self.client = None
     
     async def upload_dzi(
         self,
@@ -166,53 +166,99 @@ class S3Storage:
             max_pool_connections=100  # 增加連接池大小以支持更多並行連接
         )
         
-        # 創建共享的 boto3 client（線程安全，可以重用）
-        shared_client = boto3.client(
-            's3',
-            region_name=self.region,
-            config=config,
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID") or None,
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY") or None
-        )
+        # 決定使用哪種上傳方式
+        use_http_put = self.is_public and not (self.access_key and self.secret_key)
         
-        # 對於大文件（>5MB），使用 upload_file with multipart
-        # 對於小文件，使用 put_object（更快，開銷更小）
-        transfer_config = boto3.s3.transfer.TransferConfig(
-            multipart_threshold=1024 * 5,  # 5MB 以上使用 multipart
-            max_concurrency=10,
-            multipart_chunksize=1024 * 5,
-            use_threads=True,
-            max_bandwidth=None
-        )
+        shared_client = None
+        transfer_config = None
+        
+        if use_http_put:
+            print("[INFO] Using direct HTTP PUT requests (no credentials, public bucket)")
+        elif self.access_key and self.secret_key:
+            # 有凭证，使用 boto3
+            shared_client = boto3.client(
+                's3',
+                region_name=self.region,
+                config=config,
+                aws_access_key_id=self.access_key,
+                aws_secret_access_key=self.secret_key
+            )
+            print("[INFO] Using boto3 with credentials")
+            
+            # 對於大文件（>5MB），使用 upload_file with multipart
+            # 對於小文件，使用 put_object（更快，開銷更小）
+            transfer_config = boto3.s3.transfer.TransferConfig(
+                multipart_threshold=1024 * 5,  # 5MB 以上使用 multipart
+                max_concurrency=10,
+                multipart_chunksize=1024 * 5,
+                use_threads=True,
+                max_bandwidth=None
+            )
+        else:
+            raise ValueError("No credentials provided and bucket is not public. Cannot upload.")
         
         # 並行上傳函數
         def upload_file(args):
             local_path, cloud_key, content_type = args
             try:
+                if not os.path.exists(local_path):
+                    error_msg = f"File not found: {local_path}"
+                    print(f"[ERROR] {error_msg}")
+                    return False, (cloud_key, error_msg)
+                
                 file_size = os.path.getsize(local_path)
                 
-                # 小文件（<5MB）使用 put_object（更快）
-                if file_size < 5 * 1024 * 1024:
+                if use_http_put:
+                    # 使用直接 HTTP PUT 請求（無簽名，適用於 public bucket）
+                    s3_url = f"{self.base_url}/{cloud_key}"
+                    
                     with open(local_path, 'rb') as f:
-                        shared_client.put_object(
-                            Bucket=self.bucket,
-                            Key=cloud_key,
-                            Body=f,
-                            ContentType=content_type
+                        response = requests.put(
+                            s3_url,
+                            data=f,
+                            headers={
+                                'Content-Type': content_type,
+                            },
+                            timeout=(30, 60)  # (connect_timeout, read_timeout)
                         )
+                    
+                    if response.status_code == 200:
+                        return True, cloud_key
+                    else:
+                        error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+                        print(f"[ERROR] Failed to upload {cloud_key}: {error_msg}")
+                        return False, (cloud_key, error_msg)
                 else:
-                    # 大文件使用 upload_file with multipart
-                    shared_client.upload_file(
-                        local_path,
-                        self.bucket,
-                        cloud_key,
-                        ExtraArgs={'ContentType': content_type},
-                        Config=transfer_config
-                    )
-                return True, cloud_key
+                    # 使用 boto3（有凭证）
+                    # 小文件（<5MB）使用 put_object（更快）
+                    if file_size < 5 * 1024 * 1024:
+                        with open(local_path, 'rb') as f:
+                            shared_client.put_object(
+                                Bucket=self.bucket,
+                                Key=cloud_key,
+                                Body=f,
+                                ContentType=content_type
+                            )
+                    else:
+                        # 大文件使用 upload_file with multipart
+                        shared_client.upload_file(
+                            local_path,
+                            self.bucket,
+                            cloud_key,
+                            ExtraArgs={'ContentType': content_type},
+                            Config=transfer_config
+                        )
+                    return True, cloud_key
             except Exception as e:
-                print(f"[ERROR] Failed to upload {cloud_key}: {e}")
-                return False, cloud_key
+                error_msg = str(e)
+                error_type = type(e).__name__
+                print(f"[ERROR] Failed to upload {cloud_key}: {error_type}: {error_msg}")
+                # 如果是认证错误，提供更详细的提示
+                if 'AccessDenied' in error_msg or 'InvalidAccessKeyId' in error_msg or 'SignatureDoesNotMatch' in error_msg:
+                    print(f"[ERROR] Authentication error - check AWS credentials or bucket permissions")
+                elif 'NoCredentialsError' in error_type or 'credentials' in error_msg.lower():
+                    print(f"[ERROR] No AWS credentials found - set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+                return False, (cloud_key, error_msg)
         
         # 大幅增加並行度 - 對於大量小文件，可以設置更高的並行度
         # S3 支持高並發，但要注意不要超過網絡帶寬
@@ -241,16 +287,24 @@ class S3Storage:
                 try:
                     result = await future
                     if isinstance(result, tuple):
-                        success, cloud_key = result
+                        success, result_data = result
+                        if isinstance(result_data, tuple):
+                            # 新格式：(cloud_key, error_msg)
+                            cloud_key, error_msg = result_data
+                        else:
+                            # 舊格式：只有 cloud_key
+                            cloud_key = result_data
+                            error_msg = None
                     else:
                         # 向後兼容舊版本
                         success = result
                         cloud_key = files_to_upload[i][1] if i < len(files_to_upload) else "unknown"
+                        error_msg = None
                     
                     if success:
                         uploaded += 1
                     else:
-                        failed_uploads.append(cloud_key)
+                        failed_uploads.append((cloud_key, error_msg))
                     
                     if on_progress:
                         on_progress(uploaded / total_files)
@@ -268,15 +322,67 @@ class S3Storage:
                             print(f"[INFO] Upload progress: {uploaded}/{total_files} ({progress_pct}%)")
                 except Exception as e:
                     print(f"[ERROR] Error processing upload result: {e}")
-                    failed_uploads.append(f"unknown_{i}")
+                    import traceback
+                    traceback.print_exc()
+                    failed_uploads.append((f"unknown_{i}", str(e)))
         
         # 檢查是否有失敗的上傳
         if failed_uploads:
             print(f"[WARNING] {len(failed_uploads)} files failed to upload:")
-            for key in failed_uploads[:10]:  # 只顯示前10個
-                print(f"  - {key}")
+            
+            # 統計錯誤類型
+            error_types = {}
+            for item in failed_uploads:
+                if isinstance(item, tuple):
+                    cloud_key, error_msg = item
+                    if error_msg:
+                        # 提取錯誤類型（第一個單詞或常見錯誤關鍵字）
+                        if 'AccessDenied' in error_msg:
+                            error_type = 'AccessDenied'
+                        elif 'InvalidAccessKeyId' in error_msg or 'NoCredentialsError' in error_msg:
+                            error_type = 'Authentication'
+                        elif 'NoSuchBucket' in error_msg:
+                            error_type = 'BucketNotFound'
+                        elif 'Network' in error_msg or 'timeout' in error_msg.lower():
+                            error_type = 'Network'
+                        else:
+                            error_type = 'Other'
+                        error_types[error_type] = error_types.get(error_type, 0) + 1
+                else:
+                    cloud_key = item
+                    error_types['Unknown'] = error_types.get('Unknown', 0) + 1
+            
+            # 顯示錯誤統計
+            if error_types:
+                print(f"[ERROR] Error summary:")
+                for error_type, count in error_types.items():
+                    print(f"  - {error_type}: {count} files")
+            
+            # 顯示前10個失敗的文件和錯誤信息
+            for item in failed_uploads[:10]:
+                if isinstance(item, tuple):
+                    cloud_key, error_msg = item
+                    if error_msg:
+                        print(f"  - {cloud_key}: {error_msg[:100]}")  # 限制錯誤信息長度
+                    else:
+                        print(f"  - {cloud_key}")
+                else:
+                    print(f"  - {item}")
+            
             if len(failed_uploads) > 10:
                 print(f"  ... and {len(failed_uploads) - 10} more")
+            
+            # 提供診斷建議
+            if 'Authentication' in error_types or 'AccessDenied' in error_types:
+                print(f"\n[DIAGNOSIS] Authentication/Authorization errors detected.")
+                print(f"  - Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables")
+                print(f"  - Verify bucket permissions and IAM policy")
+                print(f"  - For public buckets, ensure bucket policy allows uploads")
+            elif 'BucketNotFound' in error_types:
+                print(f"\n[DIAGNOSIS] Bucket not found.")
+                print(f"  - Verify bucket name: {self.bucket}")
+                print(f"  - Check region: {self.region}")
+            
             raise Exception(f"Failed to upload {len(failed_uploads)} files out of {total_files}")
         
         # 性能監控：上傳階段結束
