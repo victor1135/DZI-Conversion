@@ -1,0 +1,51 @@
+# 優化版 Dockerfile - 多階段構建以減小最終鏡像大小
+# 使用多階段構建：第一階段用於編譯，第二階段只包含運行時依賴
+
+# 第一階段：構建階段（包含編譯工具）
+FROM python:3.11-slim as builder
+
+WORKDIR /app
+
+# 安裝編譯工具和依賴
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    python3-dev \
+    libvips-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# 複製依賴文件
+COPY requirements.txt .
+
+# 安裝 Python 依賴到臨時目錄
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# 第二階段：運行階段（只包含運行時依賴）
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 只安裝運行時需要的系統依賴（不包含編譯工具）
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libvips \
+    && rm -rf /var/lib/apt/lists/*
+
+# 從構建階段複製已安裝的 Python 包
+COPY --from=builder /root/.local /root/.local
+
+# 確保 Python 能找到用戶安裝的包
+ENV PATH=/root/.local/bin:$PATH
+
+# 複製應用程序代碼
+COPY . .
+
+# 暴露端口
+EXPOSE 8000
+
+# 啟動命令
+CMD ["sh", "-c", "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

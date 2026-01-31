@@ -121,6 +121,15 @@ Railway 會自動檢測並安裝系統依賴。如果沒有自動安裝，可以
 
 ## 🐛 常見問題
 
+### Q: 構建時出現 "gcc failed: No such file or directory" 錯誤？
+
+**A:** 這是因為 `pyvips` 需要從源碼編譯，需要編譯工具。已更新的 `Dockerfile` 已包含：
+- `build-essential` (包含 gcc, g++, make)
+- `python3-dev` (Python 開發頭文件)
+- `pkg-config` (用於查找庫)
+
+如果仍然遇到問題，確保 Dockerfile 包含這些依賴。
+
 ### Q: Railway 會自動安裝 libvips 嗎？
 
 **A:** 
