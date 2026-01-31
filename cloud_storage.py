@@ -260,17 +260,39 @@ class S3Storage:
                     print(f"[ERROR] No AWS credentials found - set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
                 return False, (cloud_key, error_msg)
         
-        # 大幅增加並行度 - 對於大量小文件，可以設置更高的並行度
-        # S3 支持高並發，但要注意不要超過網絡帶寬
-        # 根據文件數量動態調整：文件越多，並行度越高
-        if total_files > 50000:
-            max_workers = 100  # 超大量文件
-        elif total_files > 10000:
-            max_workers = 50   # 大量文件
-        elif total_files > 1000:
-            max_workers = 30   # 中等數量
-        else:
-            max_workers = 20   # 少量文件
+        # 根據可用內存動態調整並行度
+        # 對於內存受限的環境（如 Railway 1GB），需要降低並行度
+        try:
+            import psutil
+            available_memory_gb = psutil.virtual_memory().available / (1024 ** 3)
+            
+            # 如果可用內存少於 1.5GB，使用保守的並行度
+            if available_memory_gb < 1.5:
+                # 內存受限環境：使用較少的並行度
+                if total_files > 10000:
+                    max_workers = 10  # 大量文件，但內存受限
+                elif total_files > 1000:
+                    max_workers = 8   # 中等數量
+                else:
+                    max_workers = 5   # 少量文件
+                print(f"[INFO] Low memory environment detected ({available_memory_gb:.2f} GB available)")
+            else:
+                # 正常環境：根據文件數量調整
+                if total_files > 50000:
+                    max_workers = 50  # 超大量文件（降低）
+                elif total_files > 10000:
+                    max_workers = 30   # 大量文件（降低）
+                elif total_files > 1000:
+                    max_workers = 15   # 中等數量（降低）
+                else:
+                    max_workers = 10   # 少量文件（降低）
+        except ImportError:
+            # 如果沒有 psutil，使用保守的默認值
+            print("[WARNING] psutil not available, using conservative worker count")
+            if total_files > 1000:
+                max_workers = 8
+            else:
+                max_workers = 5
         
         print(f"[PERF] Using {max_workers} parallel workers for upload")
         

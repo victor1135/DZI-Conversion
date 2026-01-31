@@ -114,9 +114,27 @@ if HAS_PYVIPS:
     
     # 設置 libvips 環境變數以充分利用 CPU
     os.environ['VIPS_CONCURRENCY'] = str(vips_threads)
-    # 增加緩存大小以提高大文件處理速度（MB）
+    
+    # 根據可用內存動態調整緩存大小
     if 'VIPS_MAX_CACHE' not in os.environ:
-        os.environ['VIPS_MAX_CACHE'] = '500'  # 500MB 緩存
+        try:
+            import psutil
+            total_memory_gb = psutil.virtual_memory().total / (1024 ** 3)
+            
+            # 對於內存受限環境（< 2GB），使用較小的緩存
+            if total_memory_gb < 2:
+                cache_mb = 100  # 100MB 緩存（適合 1GB 內存環境）
+                print(f"[INFO] Low memory environment ({total_memory_gb:.2f} GB), using {cache_mb}MB cache")
+            elif total_memory_gb < 4:
+                cache_mb = 200  # 200MB 緩存
+            else:
+                cache_mb = 500  # 500MB 緩存（正常環境）
+            
+            os.environ['VIPS_MAX_CACHE'] = str(cache_mb)
+        except ImportError:
+            # 如果沒有 psutil，使用保守的默認值
+            os.environ['VIPS_MAX_CACHE'] = '100'  # 100MB 緩存（保守）
+            print("[WARNING] psutil not available, using 100MB cache (conservative)")
     
     print("[OK] pyvips available - using libvips for high-performance conversion")
     print(f"[INFO] libvips configured: {vips_threads} threads (CPU cores: {cpu_count})")
@@ -253,9 +271,14 @@ class DZIConverter:
         print(f"[PERF] Starting DZI conversion:")
         print(f"  Input file: {os.path.basename(input_path)} ({input_size_mb:.2f} MB)")
         
-        # 讀取圖像
+        # 讀取圖像（使用流式讀取，減少內存使用）
         image_load_start = time.time()
-        image = pyvips.Image.new_from_file(input_path)
+        # 使用 access='sequential' 可以減少內存使用（適合大文件）
+        try:
+            image = pyvips.Image.new_from_file(input_path, access='sequential')
+        except:
+            # 如果 sequential 模式失敗，回退到默認模式
+            image = pyvips.Image.new_from_file(input_path)
         image_load_time = time.time() - image_load_start
         
         # 獲取圖像尺寸
@@ -275,13 +298,19 @@ class DZIConverter:
         # libvips 會自動使用多線程來並行處理瓦片生成
         dzsave_start = time.time()
         
-        image.dzsave(
-            dzi_path.replace('.dzi', ''),
-            tile_size=tile_size,
-            overlap=overlap,
-            suffix=suffix,
-            properties=True
-        )
+        try:
+            image.dzsave(
+                dzi_path.replace('.dzi', ''),
+                tile_size=tile_size,
+                overlap=overlap,
+                suffix=suffix,
+                properties=True
+            )
+        finally:
+            # 確保圖像對象被釋放
+            del image
+            import gc
+            gc.collect()
         
         dzsave_time = time.time() - dzsave_start
         total_time = time.time() - conversion_start
