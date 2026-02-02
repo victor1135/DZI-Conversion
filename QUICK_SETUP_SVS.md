@@ -8,10 +8,14 @@
 
 ## 解決方案
 
-### 步驟 1: 下載 libvips
+### 步驟 1: 下載 libvips（必須包含 JPEG2000 支持）
+
+**⚠️ 重要：SVS 文件需要 JPEG2000 支持！**
 
 1. 前往：https://github.com/libvips/libvips/releases
-2. 下載最新版本的 `vips-dev-w64-web-*.zip`（例如：`vips-dev-w64-web-8.15.0.zip`）
+2. **下載包含 JPEG2000 支持的版本**：
+   - **`vips-dev-w64-all-*.zip`** ⭐ **推薦**（包含所有格式，包括 JPEG2000）
+   - 或 `vips-dev-w64-web-*.zip`（通常也包含 JPEG2000）
 3. 解壓縮到固定位置，例如：`C:\vips-dev-8.15.0\`
 
 ### 步驟 2: 設置路徑（三選一）
@@ -55,10 +59,20 @@ os.environ['PATH'] = os.path.join(vipshome, 'bin') + ';' + os.environ['PATH']
 python setup_libvips_path.py
 ```
 
+檢查 JPEG2000 支持：
+```bash
+python check_jpeg2000_support.py
+```
+
 或直接測試：
 ```bash
 python -c "import pyvips; print('Success! Version:', pyvips.version(0))"
 ```
+
+**如果出現 JPEG2000 不支持錯誤：**
+- 確認下載的是 `vips-dev-w64-all-*.zip` 或 `vips-dev-w64-web-*.zip`
+- 檢查 `C:\vips-dev-8.15.0\bin` 目錄中是否有 `libopenjp2.dll` 或 `openjpeg.dll`
+- 如果沒有，請重新下載包含所有格式的版本
 
 ### 步驟 4: 重新上傳 SVS 檔案
 

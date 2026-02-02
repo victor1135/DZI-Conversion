@@ -2,8 +2,13 @@
 
 ## 步驟 1: 下載 libvips
 
+**重要：處理 SVS 文件需要 JPEG2000 支持！**
+
 1. 前往 [libvips GitHub Releases](https://github.com/libvips/libvips/releases)
-2. 下載最新版本的 `vips-dev-w64-web-*.zip`（例如：`vips-dev-w64-web-8.15.0.zip`）
+2. **下載包含 JPEG2000 支持的版本**（二選一）：
+   - **`vips-dev-w64-all-*.zip`** ⭐ **推薦**（包含所有格式支持，包括 JPEG2000）
+   - **`vips-dev-w64-web-*.zip`**（包含 web 格式支持，通常也包含 JPEG2000）
+   - ❌ **不要使用** `vips-dev-w64-*.zip`（基礎版本，可能不包含 JPEG2000）
 3. 解壓縮到一個固定位置，例如：
    - `C:\vips-dev-8.15.0\`
    - 或 `D:\libs\vips-dev-8.15.0\`

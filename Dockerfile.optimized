@@ -7,6 +7,7 @@ FROM python:3.11-slim as builder
 WORKDIR /app
 
 # 安裝編譯工具和依賴
+# 注意：SVS 文件需要 JPEG2000 支持，需要安裝 libopenjp2
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -15,6 +16,8 @@ RUN apt-get update && \
     make \
     python3-dev \
     libvips-dev \
+    libopenjp2-7-dev \
+    libopenjp2-tools \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -30,9 +33,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # 只安裝運行時需要的系統依賴（不包含編譯工具）
+# 注意：需要 libopenjp2 以支持 JPEG2000（SVS 文件）
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libvips \
+    libopenjp2-7 \
     && rm -rf /var/lib/apt/lists/*
 
 # 從構建階段複製已安裝的 Python 包

@@ -6,6 +6,7 @@ WORKDIR /app
 
 # 安裝系統依賴（包括 libvips 和編譯工具）
 # pyvips 需要從源碼編譯，所以需要 gcc 等編譯工具
+# 注意：SVS 文件需要 JPEG2000 支持，需要安裝 libopenjp2
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential \
@@ -14,6 +15,8 @@ RUN apt-get update && \
     make \
     python3-dev \
     libvips-dev \
+    libopenjp2-7-dev \
+    libopenjp2-tools \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 

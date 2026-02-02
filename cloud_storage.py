@@ -185,15 +185,35 @@ class S3Storage:
             )
             print("[INFO] Using boto3 with credentials")
             
-            # 對於大文件（>5MB），使用 upload_file with multipart
+            # 對於大文件（>5MB），使用 upload_file with multipart（切片上傳）
             # 對於小文件，使用 put_object（更快，開銷更小）
+            # 優化切片大小：根據可用內存動態調整
+            try:
+                import psutil
+                available_memory_gb = psutil.virtual_memory().available / (1024 ** 3)
+                # 內存受限環境使用較小的切片
+                if available_memory_gb < 1.5:
+                    chunk_size_mb = 2  # 2MB 切片（適合 1GB 內存環境）
+                    multipart_threshold_mb = 5  # 5MB 以上使用 multipart
+                    max_concurrency = 3  # 降低並發度
+                else:
+                    chunk_size_mb = 5  # 5MB 切片
+                    multipart_threshold_mb = 5  # 5MB 以上使用 multipart
+                    max_concurrency = 5  # 適中的並發度
+            except ImportError:
+                # 保守默認值（適合低內存環境）
+                chunk_size_mb = 2
+                multipart_threshold_mb = 5
+                max_concurrency = 3
+            
             transfer_config = boto3.s3.transfer.TransferConfig(
-                multipart_threshold=1024 * 5,  # 5MB 以上使用 multipart
-                max_concurrency=10,
-                multipart_chunksize=1024 * 5,
+                multipart_threshold=multipart_threshold_mb * 1024 * 1024,  # 閾值
+                max_concurrency=max_concurrency,  # 降低並發度以減少內存使用
+                multipart_chunksize=chunk_size_mb * 1024 * 1024,  # 切片大小
                 use_threads=True,
                 max_bandwidth=None
             )
+            print(f"[INFO] Multipart upload config: {chunk_size_mb}MB chunks, {max_concurrency} concurrent parts")
         else:
             raise ValueError("No credentials provided and bucket is not public. Cannot upload.")
         
@@ -241,16 +261,41 @@ class S3Storage:
                     
                     if use_http_put:
                         # 使用直接 HTTP PUT 請求（無簽名，適用於 public bucket）
+                        # 對於大文件，使用切片上傳以減少內存使用
                         s3_url = f"{self.base_url}/{cloud_key}"
+                        chunk_size = 5 * 1024 * 1024  # 5MB 切片
                         
-                        with open(local_path, 'rb') as f:
+                        # 小文件（<10MB）直接上傳
+                        if file_size < 10 * 1024 * 1024:
+                            with open(local_path, 'rb') as f:
+                                response = requests.put(
+                                    s3_url,
+                                    data=f,
+                                    headers={
+                                        'Content-Type': content_type,
+                                    },
+                                    timeout=(30, 120)
+                                )
+                        else:
+                            # 大文件使用切片上傳（流式）
+                            def file_chunks():
+                                """生成文件切片生成器"""
+                                with open(local_path, 'rb') as f:
+                                    while True:
+                                        chunk = f.read(chunk_size)
+                                        if not chunk:
+                                            break
+                                        yield chunk
+                            
+                            # 使用流式上傳
                             response = requests.put(
                                 s3_url,
-                                data=f,
+                                data=file_chunks(),
                                 headers={
                                     'Content-Type': content_type,
                                 },
-                                timeout=(30, 120)  # 增加超時時間
+                                timeout=(30, 300),  # 大文件需要更長的超時
+                                stream=False  # requests 會自動處理生成器
                             )
                         
                         if response.status_code == 200:
@@ -271,6 +316,7 @@ class S3Storage:
                         # 使用 boto3（有凭证）
                         # 小文件（<5MB）使用 put_object（更快）
                         if file_size < 5 * 1024 * 1024:
+                            # 使用流式讀取減少內存
                             with open(local_path, 'rb') as f:
                                 shared_client.put_object(
                                     Bucket=self.bucket,
@@ -279,7 +325,8 @@ class S3Storage:
                                     ContentType=content_type
                                 )
                         else:
-                            # 大文件使用 upload_file with multipart
+                            # 大文件使用 upload_file with multipart（自動切片）
+                            # boto3 會自動將大文件分成多個部分上傳
                             shared_client.upload_file(
                                 local_path,
                                 self.bucket,
@@ -385,7 +432,14 @@ class S3Storage:
                         failed_uploads.append((cloud_key, error_msg))
                     
                     if on_progress:
-                        on_progress(uploaded / total_files)
+                        try:
+                            progress_value = uploaded / total_files if total_files > 0 else 0.0
+                            on_progress(progress_value)
+                            # 每上传一定数量的文件打印一次进度（避免日志过多）
+                            if uploaded % max(1, total_files // 20) == 0:  # 大约每 5% 打印一次
+                                print(f"[DEBUG] Upload progress callback: {uploaded}/{total_files} ({progress_value:.1%})")
+                        except Exception as e:
+                            print(f"[ERROR] Error calling progress callback: {e}")
                     
                     # 每上傳 100 個檔案輸出一次進度
                     if uploaded % 100 == 0:
@@ -577,7 +631,14 @@ class OSSStorage:
                 await future
                 uploaded += 1
                 if on_progress:
-                    on_progress(uploaded / total_files)
+                    try:
+                        progress_value = uploaded / total_files if total_files > 0 else 0.0
+                        on_progress(progress_value)
+                        # 每上传一定数量的文件打印一次进度（避免日志过多）
+                        if uploaded % max(1, total_files // 20) == 0:  # 大约每 5% 打印一次
+                            print(f"[DEBUG] Upload progress callback (chunked): {uploaded}/{total_files} ({progress_value:.1%})")
+                    except Exception as e:
+                        print(f"[ERROR] Error calling progress callback (chunked): {e}")
         
         dzi_url = f"{self.base_url}/{cloud_prefix}.dzi"
         thumbnail_url = f"{self.base_url}/{cloud_prefix}_thumbnail.jpg"

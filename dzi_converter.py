@@ -43,10 +43,14 @@ def _try_find_libvips():
     # Windows 常見安裝位置
     if is_windows:
         common_paths = [
+            r"C:\vips-dev-8.18\bin",    # 最新版本（包含所有格式）
+            r"C:\vips-dev-8.18.0\bin",  # 最新版本（包含所有格式）
             r"C:\vips-dev-8.15.0\bin",
             r"C:\vips-dev-8.14.0\bin",
             r"C:\vips-dev-8.13.0\bin",
             r"C:\vips-dev-8.12.0\bin",
+            r"D:\vips-dev-8.18\bin",
+            r"D:\vips-dev-8.18.0\bin",
             r"D:\vips-dev-8.15.0\bin",
             r"D:\libs\vips-dev-8.15.0\bin",
         ]
@@ -273,12 +277,38 @@ class DZIConverter:
         
         # 讀取圖像（使用流式讀取，減少內存使用）
         image_load_start = time.time()
-        # 使用 access='sequential' 可以減少內存使用（適合大文件）
+        
+        # 嘗試讀取圖像，處理 JPEG2000 不支持的情況
         try:
-            image = pyvips.Image.new_from_file(input_path, access='sequential')
-        except:
-            # 如果 sequential 模式失敗，回退到默認模式
-            image = pyvips.Image.new_from_file(input_path)
+            # 使用 access='sequential' 可以減少內存使用（適合大文件）
+            try:
+                image = pyvips.Image.new_from_file(input_path, access='sequential')
+            except Exception as seq_error:
+                # 如果 sequential 模式失敗，回退到默認模式
+                if 'JPEG2000' in str(seq_error) or 'jp2k' in str(seq_error).lower():
+                    raise ValueError(
+                        "libvips was built without JPEG2000 support. "
+                        "SVS files require JPEG2000 support. "
+                        "Please install libopenjp2-7-dev and rebuild libvips, "
+                        "or use a libvips build that includes JPEG2000 support."
+                    )
+                image = pyvips.Image.new_from_file(input_path)
+        except ValueError:
+            # 重新拋出我們自己的錯誤
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            # 檢查是否是 JPEG2000 相關錯誤
+            if 'JPEG2000' in error_msg or 'jp2k' in error_msg.lower() or 'openjpeg' in error_msg.lower():
+                raise ValueError(
+                    f"libvips cannot process this SVS file: JPEG2000 support is missing.\n"
+                    f"Error: {error_msg}\n\n"
+                    f"Solution: Install libopenjp2-7-dev and ensure libvips is built with JPEG2000 support.\n"
+                    f"For Railway: The Dockerfile has been updated to include libopenjp2-7-dev.\n"
+                    f"Please rebuild and redeploy the Docker image."
+                )
+            # 其他錯誤直接拋出
+            raise
         image_load_time = time.time() - image_load_start
         
         # 獲取圖像尺寸
